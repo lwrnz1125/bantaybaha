@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bantay Baha Flood Monitor</title>
+    <!-- Tailwind CSS para sa mabilis at mobile-responsive styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Chart.js para sa line chart -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="bg-gray-100 text-gray-800 font-sans leading-normal tracking-normal">
+
+    <div class="container mx-auto p-4 max-w-md">
+        <!-- Header -->
+        <header class="mb-6 text-center">
+            <h1 class="text-2xl font-bold text-gray-900">Bantay Baha Monitor</h1>
+            <p class="text-sm text-gray-600">Real-time flood tracking & advisory</p>
+        </header>
+
+        <!-- Current Water Level Card -->
+        <div id="status-card" class="bg-white p-6 rounded-lg shadow-md mb-6 text-center border-l-8 border-gray-300">
+            <h2 class="text-sm font-semibold uppercase text-gray-500">Current Water Level</h2>
+            <div id="water-level-text" class="text-5xl font-extrabold my-2">-- cm</div>
+            <div id="status-badge" class="inline-block px-3 py-1 rounded-full text-white text-sm font-bold bg-gray-400">Loading...</div>
+        </div>
+
+        <!-- Data Analytics Summary (Part E placeholder) -->
+        <div class="bg-white p-4 rounded-lg shadow-md mb-6">
+            <h3 class="text-md font-bold mb-2 text-gray-700">Analytics Summary</h3>
+            <div class="grid grid-cols-2 gap-2 text-sm">
+                <div>Average: <span id="avg-val" class="font-semibold">--</span></div>
+                <div>Trend: <span id="trend-val" class="font-semibold">--</span></div>
+                <div>Min: <span id="min-val" class="font-semibold">--</span></div>
+                <div>Max: <span id="max-val" class="font-semibold">--</span></div>
+            </div>
+        </div>
+
+        <!-- Line Chart -->
+        <div class="bg-white p-4 rounded-lg shadow-md mb-6">
+            <h3 class="text-md font-bold mb-2 text-gray-700">Water Level Trend</h3>
+            <canvas id="floodChart"></canvas>
+        </div>
+
+        <!-- 10 Latest Readings Table -->
+        <div class="bg-white p-4 rounded-lg shadow-md overflow-x-auto">
+            <h3 class="text-md font-bold mb-2 text-gray-700">Latest 10 Readings</h3>
+            <table class="min-w-full text-left text-sm">
+                <thead>
+                    <tr class="border-b">
+                        <th class="py-2 px-2">Timestamp</th>
+                        <th class="py-2 px-2">Sensor</th>
+                        <th class="py-2 px-2">Level (cm)</th>
+                    </tr>
+                </thead>
+                <tbody id="readings-table-body">
+                    <tr>
+                        <td colspan="3" class="py-2 text-center text-gray-500">No data yet</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        let floodChart;
+
+        function initChart() {
+            const ctx = document.getElementById('floodChart').getContext('2d');
+            floodChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Water Level (cm)',
+                        data: [],
+                        borderColor: 'rgb(59, 130, 246)',
+                        tension: 0.1,
+                        fill: false
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        y: {
+                            min: 0,
+                            max: 500
+                        }
+                    }
+                }
+            });
+        }
+
+        async function fetchData() {
+            try {
+                // Fetch readings
+                const resReadings = await fetch('/api/readings');
+                const readings = await resReadings.json();
+
+                // Fetch summary
+                const resSummary = await fetch('/api/summary');
+                const summary = await resSummary.json();
+
+                updateUI(readings, summary);
+            } catch (error) {
+                console.error('Error fetching data:', error);
+            }
+        }
+
+        function updateUI(readings, summary) {
+            if (readings.length === 0) return;
+
+            const latest = readings[0];
+            const level = latest.waterLevelCm;
+
+            // Update Current Water Level Text & Colors
+            const levelText = document.getElementById('water-level-text');
+            const statusCard = document.getElementById('status-card');
+            const statusBadge = document.getElementById('status-badge');
+
+            levelText.innerText = `${level} cm`;
+
+            // Status rules: Normal (<100 green), Alert (100-149 orange), Danger (150+ red)
+            statusCard.classList.remove('border-green-500', 'border-orange-500', 'border-red-500');
+            statusBadge.classList.remove('bg-green-500', 'bg-orange-500', 'bg-red-500');
+
+            if (level < 100) {
+                statusCard.classList.add('border-green-500');
+                statusBadge.classList.add('bg-green-500');
+                statusBadge.innerText = 'NORMAL';
+            } else if (level <= 149) {
+                statusCard.classList.add('border-orange-500');
+                statusBadge.classList.add('bg-orange-500');
+                statusBadge.innerText = 'ALERT';
+            } else {
+                statusCard.classList.add('border-red-500');
+                statusBadge.classList.add('bg-red-500');
+                statusBadge.innerText = 'DANGER';
+            }
+
+            // Update Summary Analytics (Part E)
+            document.getElementById('avg-val').innerText = `${summary.average} cm`;
+            document.getElementById('min-val').innerText = `${summary.min} cm`;
+            document.getElementById('max-val').innerText = `${summary.max} cm`;
+            document.getElementById('trend-val').innerText = summary.trend.toUpperCase();
+
+            // Update Table (10 latest readings)
+            const tableBody = document.getElementById('readings-table-body');
+            tableBody.innerHTML = '';
+            const latest10 = readings.slice(0, 10);
+            latest10.forEach(r => {
+                const row = document.createElement('tr');
+                row.classList.add('border-b');
+                const timeStr = new Date(r.timestamp).toLocaleTimeString();
+                row.innerHTML = `
+                    <td class="py-2 px-2 text-xs">${timeStr}</td>
+                    <td class="py-2 px-2">${r.sensorId}</td>
+                    <td class="py-2 px-2 font-bold">${r.waterLevelCm} cm</td>
+                `;
+                tableBody.appendChild(row);
+            });
+
+            // Update Chart (reverse to show chronological order left-to-right)
+            const chartData = [...readings].reverse().slice(-20); // huling 20 para malinaw sa chart
+            floodChart.data.labels = chartData.map(r => new Date(r.timestamp).toLocaleTimeString());
+            floodChart.data.datasets[0].data = chartData.map(r => r.waterLevelCm);
+            floodChart.update();
+        }
+
+        // Initialize and setup interval for auto-refresh every 5 seconds
+        initChart();
+        fetchData();
+        setInterval(fetchData, 5000);
+    </script>
+</body>
+</html>
