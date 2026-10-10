@@ -1,48 +1,128 @@
-// sensor.js
-const API_URL = 'http://localhost:3000/api/readings'; // Palitan ng live URL kapag nasa Part G na
+const express = require('express');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
-let currentLevel = 85.5; // Magsimula sa normal na water level (cm)
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-function sendSensorReading() {
-    // Unti-unting pagbabago (gradual step): random na tataas o baba ng konti mula sa huling value
-    const step = (Math.random() * 4) - 2; // Magbibigay ng pagbabago sa pagitan ng -2cm at +2cm
-    currentLevel += step;
+app.use(express.json());
+app.use(express.static('public'));
 
-    // Panatilihing nasa valid range (0 hanggang 500 cm)
-    currentLevel = Math.max(0, Math.min(500, parseFloat(currentLevel.toFixed(1))));
+// In-memory storage para sa mga readings
+let readings = [];
 
-    const payload = {
-        sensorId: "CREEK-01",
-        waterLevelCm: currentLevel,
-        timestamp: new Date().toISOString()
-    };
+// Initialize Google Gen AI
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-    /* 
-      NOTE: A real IoT setup would replace this software script with a physical microcontroller 
-      (such as an ESP32 or ESP8266) wired to an ultrasonic distance sensor (like HC-SR04) 
-      installed above the creek, transmitting live telemetry data over Wi-Fi (HTTP/MQTT).
-    */
-
-    fetch(API_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-    })
-    .then(response => {
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        return response.json();
-    })
-    .then(data => {
-        console.log(`[Sensor Simulator] Sent: ${currentLevel} cm`, data);
-    })
-    .catch(error => {
-        console.error('[Sensor Simulator] Failed to send reading:', error.message);
-    });
+// Helper para sa data validation
+function isValidReading(data) {
+    if (!data.sensorId || data.waterLevelCm === undefined || data.waterLevelCm === null) {
+        return false;
+    }
+    if (typeof data.waterLevelCm !== 'number' || isNaN(data.waterLevelCm)) {
+        return false;
+    }
+    if (data.waterLevelCm < 0 || data.waterLevelCm > 500) {
+        return false;
+    }
+    return true;
 }
 
-// Mag-execute kada 5 segundo (5000 ms)
-setInterval(sendSensorReading, 5000);
+// 1. POST /api/readings
+app.post('/api/readings', (req, res) => {
+    const { sensorId, waterLevelCm, timestamp } = req.body;
+    
+    if (!isValidReading({ sensorId, waterLevelCm })) {
+        return res.status(400).json({ error: 'Invalid or missing fields.' });
+    }
 
-console.log('IoT Sensor Simulator is running... Press Ctrl+C to stop.');
+    const newReading = {
+        sensorId,
+        waterLevelCm,
+        timestamp: timestamp || new Date().toISOString()
+    };
+
+    readings.unshift(newReading);
+    if (readings.length > 1000) readings.pop();
+
+    return res.status(201).json({ message: 'Reading saved successfully', data: newReading });
+});
+
+// 2. GET /api/readings
+app.get('/api/readings', (req, res) => {
+    res.json(readings.slice(0, 50));
+});
+
+// 3. GET /api/summary
+app.get('/api/summary', (req, res) => {
+    if (readings.length === 0) {
+        return res.json({
+            count: 0,
+            average: 0,
+            min: 0,
+            max: 0,
+            statusCounts: { normal: 0, alert: 0, danger: 0 },
+            trend: 'steady'
+        });
+    }
+
+    const levels = readings.map(r => r.waterLevelCm);
+    const sum = levels.reduce((a, b) => a + b, 0);
+    const average = sum / levels.length;
+    const min = Math.min(...levels);
+    const max = Math.max(...levels);
+
+    let normal = 0, alert = 0, danger = 0;
+    readings.forEach(r => {
+        if (r.waterLevelCm < 100) normal++;
+        else if (r.waterLevelCm <= 149) alert++;
+        else danger++;
+    });
+
+    let trend = 'steady';
+    if (readings.length >= 10) {
+        const last5 = readings.slice(0, 5).map(r => r.waterLevelCm);
+        const prev5 = readings.slice(5, 10).map(r => r.waterLevelCm);
+        const avgLast5 = last5.reduce((a, b) => a + b, 0) / 5;
+        const avgPrev5 = prev5.reduce((a, b) => a + b, 0) / 5;
+
+        if (avgLast5 > avgPrev5 + 1) trend = 'rising';
+        else if (avgLast5 < avgPrev5 - 1) trend = 'falling';
+    }
+
+    res.json({
+        count: readings.length,
+        average: parseFloat(average.toFixed(2)),
+        min,
+        max,
+        statusCounts: { normal, alert, danger },
+        trend
+    });
+});
+
+// 4. POST /api/advisory (Gemini AI + Fallback)
+app.post('/api/advisory', async (req, res) => {
+    const summary = req.body;
+    let fallbackAdvisory = "Maging alerto sa pagbabago ng tubig. Manatiling ligtas.";
+    if (summary.max >= 150) {
+        fallbackAdvisory = "DANGER LEVEL: Lumikas na agad sa mas mataas na lugar para sa kaligtasan.";
+    } else if (summary.max >= 100) {
+        fallbackAdvisory = "ALERT LEVEL: Maghanda na sa posibleng pagtaas ng tubig malapit sa sapa.";
+    }
+
+    try {
+        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+        const prompt = `Based on the following flood summary data: Average level ${summary.average}cm, Minimum ${summary.min}cm, Maximum ${summary.max}cm, Trend is ${summary.trend}. Write a short advisory (3 sentences or fewer) in both Filipino and English telling residents what to do. Use only the numbers provided.`;
+
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        const advisoryText = response.text();
+        res.json({ advisory: advisoryText, source: 'ai' });
+    } catch (error) {
+        console.error('Gemini API Error, using fallback:', error.message);
+        res.json({ advisory: fallbackAdvisory, source: 'fallback' });
+    }
+});
+
+app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+});
